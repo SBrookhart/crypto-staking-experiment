@@ -34,6 +34,12 @@ This project is a vibe-coded prototype for a simple crypto staking dashboard usi
 - Start development server locally:  
   `npm start`
 
+## Quick Start
+1. Deploy the provided Solidity contract (`contracts/SimpleStaking.sol`) to an Ethereum testnet via Remix.
+2. Update `stakingContractAddress` and `stakingContractABI` in `src/StakingDashboard.jsx`.
+3. Run `npm install` to install dependencies.
+4. Run `npm start` (local) or deploy to Vercel/Netlify (cloud).
+
 ---
 
 ## License
