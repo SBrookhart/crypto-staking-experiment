@@ -1,140 +1,212 @@
-import React, { useState, useEffect } from 'react';
-import { ethers } from 'ethers';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  Contract,
+  formatUnits,
+  parseUnits
+} from 'ethers';
 
-// Replace these with your deployed contract info
-const stakingContractAddress = 'REPLACE_WITH_CONTRACT_ADDRESS';
+// ========= 1) FILL THESE IN =========
+const stakingContractAddress = "PASTE_YOUR_DEPLOYED_STAKING_ADDRESS_HERE";
+
+// Paste the ABI array from Remix (SimpleStaking ABI)
 const stakingContractABI = [
-  // Minimal ABI needed to interact with the contract
-  "function stake(uint256 amount) external",
-  "function withdraw(uint256 amount) external",
-  "function pendingReward(address user) external view returns (uint256)",
-  "function stakedBalance(address user) external view returns (uint256)",
-  "function stakingToken() external view returns (address)"
+  // PASTE YOUR ABI ARRAY HERE
 ];
 
+// Minimal ERC-20 ABI for approve/balance/decimals
 const erc20ABI = [
-  "function approve(address spender, uint256 amount) external returns (bool)",
-  "function balanceOf(address account) external view returns (uint256)",
-  "function decimals() external view returns (uint8)",
+  { "inputs": [], "name": "decimals", "outputs": [{ "internalType": "uint8", "name": "", "type": "uint8" }], "stateMutability": "view", "type": "function" },
+  { "inputs": [{ "internalType": "address", "name": "account", "type": "address" }], "name": "balanceOf", "outputs": [{ "internalType": "uint256", "name": "", "type": "uint256" }], "stateMutability": "view", "type": "function" },
+  { "inputs": [{ "internalType": "address", "name": "spender", "type": "address" }, { "internalType": "uint256", "name": "amount", "type": "uint256" }], "name": "approve", "outputs": [{ "internalType": "bool", "name": "", "type": "bool" }], "stateMutability": "nonpayable", "type": "function" }
 ];
 
-function StakingDashboard() {
-  const [provider, setProvider] = useState(null);
-  const [signer, setSigner] = useState(null);
-  const [account, setAccount] = useState(null);
-  const [contract, setContract] = useState(null);
-  const [tokenContract, setTokenContract] = useState(null);
-  const [stakeAmount, setStakeAmount] = useState('');
-  const [withdrawAmount, setWithdrawAmount] = useState('');
-  const [stakedBalance, setStakedBalance] = useState('0');
-  const [pendingRewards, setPendingRewards] = useState('0');
+export default function StakingDashboard({ burnerWallet }) {
+  const [tokenAddress, setTokenAddress] = useState('PASTE_YOUR_TEST_ERC20_ADDRESS_HERE');
+
+  const [staking, setStaking] = useState(null);
+  const [token, setToken] = useState(null);
   const [decimals, setDecimals] = useState(18);
 
+  const [stakeInput, setStakeInput] = useState('');
+  const [withdrawInput, setWithdrawInput] = useState('');
+  const [approveInput, setApproveInput] = useState('');
+
+  const [userStake, setUserStake] = useState('0');
+  const [pendingRewards, setPendingRewards] = useState('0');
+  const [totalStaked, setTotalStaked] = useState('0');
+  const [tokenBalance, setTokenBalance] = useState('0');
+
+  // Fixed to Sepolia by RPC; no extension needed.
+  const shortAddr = useMemo(() => burnerWallet.address.slice(0, 6) + '…' + burnerWallet.address.slice(-4), [burnerWallet.address]);
+
   useEffect(() => {
-    if (contract && account) {
-      updateBalances();
-    }
-  }, [contract, account]);
+    if (!burnerWallet || !tokenAddress) return;
+    const stakingC = new Contract(stakingContractAddress, stakingContractABI, burnerWallet);
+    const tokenC = new Contract(tokenAddress, erc20ABI, burnerWallet);
+    setStaking(stakingC);
+    setToken(tokenC);
+  }, [burnerWallet, tokenAddress]);
 
-  async function connectWallet() {
-    if (window.ethereum) {
-      const prov = new ethers.providers.Web3Provider(window.ethereum);
-      await prov.send("eth_requestAccounts", []);
-      const sign = prov.getSigner();
-      const userAddr = await sign.getAddress();
-      setProvider(prov);
-      setSigner(sign);
-      setAccount(userAddr);
-      const stakingCont = new ethers.Contract(stakingContractAddress, stakingContractABI, sign);
-      setContract(stakingCont);
-      const tokenAddr = await stakingCont.stakingToken();
-      const tokenCont = new ethers.Contract(tokenAddr, erc20ABI, sign);
-      setTokenContract(tokenCont);
-      const dec = await tokenCont.decimals();
-      setDecimals(dec);
-    } else {
-      alert("Please install MetaMask!");
-    }
-  }
-
-  async function updateBalances() {
-    try {
-      const staked = await contract.stakedBalance(account);
-      const pending = await contract.pendingReward(account);
-      setStakedBalance(ethers.utils.formatUnits(staked, decimals));
-      setPendingRewards(ethers.utils.formatUnits(pending, decimals));
-    } catch (err) {
-      console.error(err);
-    }
-  }
-
-  async function handleStake() {
-    if (!stakeAmount || isNaN(stakeAmount) || Number(stakeAmount) <= 0) return alert("Enter valid stake amount");
-    const amountWei = ethers.utils.parseUnits(stakeAmount, decimals);
-    try {
-      const allowance = await tokenContract.allowance(account, stakingContractAddress);
-      if (allowance.lt(amountWei)) {
-        const approveTx = await tokenContract.approve(stakingContractAddress, amountWei);
-        await approveTx.wait();
+  useEffect(() => {
+    async function boot() {
+      if (!token) return;
+      try {
+        const d = await token.decimals();
+        setDecimals(d);
+      } catch {
+        setDecimals(18);
       }
-      const stakeTx = await contract.stake(amountWei);
-      await stakeTx.wait();
-      setStakeAmount('');
-      await updateBalances();
-    } catch (err) {
-      console.error(err);
-      alert('Error staking tokens');
+      refresh();
+    }
+    boot();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, staking]);
+
+  async function refresh() {
+    if (!staking || !token) return;
+    try {
+      const [stakeBN, rewardsBN, totalBN, balBN] = await Promise.all([
+        staking.userStake(burnerWallet.address),
+        staking.earned(burnerWallet.address),
+        staking.totalStaked(),
+        token.balanceOf(burnerWallet.address)
+      ]);
+      setUserStake(formatUnits(stakeBN, decimals));
+      setPendingRewards(formatUnits(rewardsBN, decimals));
+      setTotalStaked(formatUnits(totalBN, decimals));
+      setTokenBalance(formatUnits(balBN, decimals));
+    } catch (e) {
+      console.error(e);
+      alert('Read failed. Check addresses/ABI and RPC.');
     }
   }
 
-  async function handleWithdraw() {
-    if (!withdrawAmount || isNaN(withdrawAmount) || Number(withdrawAmount) <= 0) return alert("Enter valid withdraw amount");
-    const amountWei = ethers.utils.parseUnits(withdrawAmount, decimals);
+  async function doApprove() {
+    if (!token) return;
     try {
-      const withdrawTx = await contract.withdraw(amountWei);
-      await withdrawTx.wait();
-      setWithdrawAmount('');
-      await updateBalances();
-    } catch (err) {
-      console.error(err);
-      alert('Error withdrawing tokens');
+      const amt = parseUnits(approveInput || '0', decimals);
+      const tx = await token.approve(stakingContractAddress, amt);
+      await tx.wait();
+      setApproveInput('');
+      alert('Approved!');
+    } catch (e) {
+      alert(e?.shortMessage || e?.message || 'Approve failed');
+    }
+  }
+
+  async function doStake() {
+    if (!staking) return;
+    try {
+      const amt = parseUnits(stakeInput || '0', decimals);
+      const tx = await staking.stake(amt);
+      await tx.wait();
+      setStakeInput('');
+      await refresh();
+      alert('Staked!');
+    } catch (e) {
+      alert(e?.shortMessage || e?.message || 'Stake failed');
+    }
+  }
+
+  async function doWithdraw() {
+    if (!staking) return;
+    try {
+      const amt = parseUnits(withdrawInput || '0', decimals);
+      const tx = await staking.withdraw(amt);
+      await tx.wait();
+      setWithdrawInput('');
+      await refresh();
+      alert('Withdrawn!');
+    } catch (e) {
+      alert(e?.shortMessage || e?.message || 'Withdraw failed');
+    }
+  }
+
+  async function doClaim() {
+    if (!staking) return;
+    try {
+      const tx = await staking.claimRewards();
+      await tx.wait();
+      await refresh();
+      alert('Rewards claimed!');
+    } catch (e) {
+      alert(e?.shortMessage || e?.message || 'Claim failed');
     }
   }
 
   return (
-    <div style={{ padding: '2rem', maxWidth: '500px', margin: 'auto' }}>
-      <h1>Crypto Staking Dashboard</h1>
-      {!account ? (
-        <button onClick={connectWallet}>Connect Wallet</button>
-      ) : (
-        <>
-          <p>Connected Account: {account}</p>
-          <p>Staked Balance: {stakedBalance}</p>
-          <p>Pending Rewards: {pendingRewards}</p>
+    <div style={{ marginTop: 16, padding: 16, border: '1px solid #ddd', borderRadius: 12 }}>
+      <div style={{ marginBottom: 8 }}>
+        <strong>Burner Wallet:</strong> {shortAddr}
+      </div>
 
-          <div style={{ marginTop: '1rem' }}>
-            <input
-              type="text"
-              placeholder="Amount to Stake"
-              value={stakeAmount}
-              onChange={e => setStakeAmount(e.target.value)}
-            />
-            <button onClick={handleStake} style={{ marginLeft: '0.5rem' }}>Stake</button>
-          </div>
+      <div style={row}>
+        <div style={card}>
+          <div><strong>Token Address (ERC-20):</strong></div>
+          <input
+            style={input}
+            value={tokenAddress}
+            onChange={e => setTokenAddress(e.target.value)}
+            placeholder="0xYourTestTokenOnSepolia"
+          />
+          <div style={{ color: '#666' }}>Balance: {tokenBalance}</div>
 
-          <div style={{ marginTop: '1rem' }}>
+          <div style={{ marginTop: 8 }}>
+            <strong>Approve</strong> (allow staking contract to spend your tokens)
             <input
-              type="text"
-              placeholder="Amount to Withdraw"
-              value={withdrawAmount}
-              onChange={e => setWithdrawAmount(e.target.value)}
+              style={input}
+              placeholder="Amount to approve"
+              value={approveInput}
+              onChange={e => setApproveInput(e.target.value)}
             />
-            <button onClick={handleWithdraw} style={{ marginLeft: '0.5rem' }}>Withdraw</button>
+            <button style={btn} onClick={doApprove}>Approve</button>
           </div>
-        </>
-      )}
+        </div>
+
+        <div style={card}>
+          <div><strong>Your Staked:</strong> {userStake}</div>
+          <div><strong>Pending Rewards:</strong> {pendingRewards}</div>
+          <div><strong>Total Staked in Contract:</strong> {totalStaked}</div>
+          <button style={btn} onClick={refresh}>Refresh</button>
+        </div>
+
+        <div style={card}>
+          <div><strong>Stake</strong></div>
+          <input
+            placeholder="Amount"
+            value={stakeInput}
+            onChange={e => setStakeInput(e.target.value)}
+            style={input}
+          />
+          <button onClick={doStake} style={btn}>Stake</button>
+        </div>
+
+        <div style={card}>
+          <div><strong>Withdraw</strong></div>
+          <input
+            placeholder="Amount"
+            value={withdrawInput}
+            onChange={e => setWithdrawInput(e.target.value)}
+            style={input}
+          />
+          <button onClick={doWithdraw} style={btn}>Withdraw</button>
+        </div>
+
+        <div style={card}>
+          <div><strong>Rewards</strong></div>
+          <button onClick={doClaim} style={btn}>Claim Rewards</button>
+        </div>
+      </div>
+
+      <p style={{ color: '#666', marginTop: 12 }}>
+        Flow: 1) Fund burner with Sepolia ETH (gas) and a test ERC-20. 2) Approve the staking contract. 3) Stake. 4) Claim later.
+        Owner of the staking contract must also deposit reward tokens via <code>fundRewards()</code> (in Remix or another wallet you control).
+      </p>
     </div>
   );
 }
 
-export default StakingDashboard;
+const row = { display: 'grid', gap: 12, gridTemplateColumns: '1fr 1fr', alignItems: 'start' };
+const card = { border: '1px solid #eee', borderRadius: 10, padding: 12, background: '#fafafa' };
+const btn = { padding: '10px 12px', borderRadius: 8, border: '1px solid #ddd', cursor: 'pointer', background: '#fff' };
+const input = { padding: '10px 12px', borderRadius: 8, border: '1px solid #ddd', margin: '6px 0' };
